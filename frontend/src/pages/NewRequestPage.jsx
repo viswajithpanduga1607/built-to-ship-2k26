@@ -9,7 +9,7 @@ import {
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
-import { requestInputSchema, REQUEST_TYPES, URGENCY_LEVELS } from '../schemas'
+import { requestInputSchema } from '../schemas'
 import { cn, URGENCY_CONFIG } from '../lib/utils'
 
 // ── Config maps ────────────────────────────────────────────────────────────
@@ -61,9 +61,8 @@ export default function NewRequestPage() {
     },
   })
 
-  const watchedType    = watch('requestType')
-  const watchedUrgency = watch('urgency')
-  const watchedJust    = watch('justification')
+  const watchedType = watch('requestType')
+  const watchedJust = watch('justification')
 
   // ── Submit handler ─────────────────────────────────────────────────────────
   const onSubmit = async (data) => {

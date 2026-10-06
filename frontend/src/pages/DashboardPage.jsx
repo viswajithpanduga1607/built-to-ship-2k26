@@ -2,13 +2,12 @@ import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import {
   PlusCircle, RefreshCw, TrendingUp, Clock, CheckCircle2,
-  XCircle, Brain, Zap, CalendarDays, ArrowUpRight
+  Brain, Zap, ArrowUpRight
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
 import { DashboardGrid } from '../components/ui/DashboardGrid'
-import { StatusBadge } from '../components/ui/StatusBadge'
-import { formatDate, getInitials, cn } from '../lib/utils'
+import { getInitials, cn } from '../lib/utils'
 
 /**
  * DashboardPage — Home route (/)
@@ -85,7 +84,6 @@ export default function DashboardPage() {
     review:   requests.filter(r => r.status === 'Requires Manual Review').length,
   }
 
-  const recentRequests = requests.slice(0, 3)
   const initials    = getInitials(profile?.full_name ?? user.email)
   const displayName = profile?.full_name ?? user.email?.split('@')[0] ?? 'Employee'
 

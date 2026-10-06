@@ -115,7 +115,7 @@ export default function AuthPage() {
 
           {/* Tabs */}
           <div className="mb-6 flex rounded-xl bg-white/5 p-1 gap-1">
-            {(['login', 'register'] as const).map(tab => (
+            {['login', 'register'].map(tab => (
               <button
                 key={tab}
                 onClick={() => handleTabSwitch(tab)}

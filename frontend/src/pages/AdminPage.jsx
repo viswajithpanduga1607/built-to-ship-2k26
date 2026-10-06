@@ -1,11 +1,10 @@
 import { useEffect, useState, useCallback } from 'react'
 import {
-  ShieldCheck, Search, Filter, RefreshCw, Download,
-  Users, Clock, CheckCircle2, XCircle, Brain, ChevronDown,
+  ShieldCheck, Search, RefreshCw, Download,
+  Users, Clock, CheckCircle2, Brain, ChevronDown,
   ArrowUpDown, AlertCircle
 } from 'lucide-react'
 import { supabase } from '../lib/supabase'
-import { useAuth } from '../contexts/AuthContext'
 import { StatusBadge } from '../components/ui/StatusBadge'
 import { RequestDetailModal } from '../components/ui/RequestDetailModal'
 import { formatDate, formatTimestamp, daysBetween, cn } from '../lib/utils'
@@ -19,7 +18,6 @@ const TYPE_FILTERS   = ['All', 'PTO', 'Sick Leave', 'Remote Work', 'Equipment']
  * and per-request AI evaluation detail modal.
  */
 export default function AdminPage() {
-  const { user } = useAuth()
   const [requests,        setRequests]        = useState([])
   const [loading,         setLoading]         = useState(true)
   const [selectedRequest, setSelectedRequest] = useState(null)
