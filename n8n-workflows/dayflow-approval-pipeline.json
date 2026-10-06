@@ -1,0 +1,267 @@
+{
+  "name": "Dayflow — AI HR Approval Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "evaluate-request",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "webhook-catch",
+      "name": "Catch Supabase Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "webhookId": "dayflow-evaluate-request"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Validate secret header ─────────────────────────────────────────────────\nconst secret = $input.first().headers['x-webhook-secret'];\nif (secret !== $env.WEBHOOK_SECRET) {\n  throw new Error('Unauthorized: Invalid webhook secret');\n}\n\n// ── Extract the Supabase DB Webhook payload ─────────────────────────────────\n// Supabase sends: { type: 'INSERT', table: 'employee_requests', record: {...} }\nconst body = $input.first().body;\nconst record = body.record ?? body;\n\nif (!record.id || !record.request_type) {\n  throw new Error('Invalid payload: missing required fields');\n}\n\n// ── Build the structured user prompt for Gemini ─────────────────────────────\nconst userPrompt = `Evaluate the following employee request:\n- Request Type: ${record.request_type}\n- Start Date: ${record.start_date}\n- End Date: ${record.end_date}\n- Urgency: ${record.urgency}\n- Justification: ${record.justification}`;\n\nreturn [{\n  json: {\n    requestId:    record.id,\n    userId:       record.user_id,\n    requestType:  record.request_type,\n    startDate:    record.start_date,\n    endDate:      record.end_date,\n    urgency:      record.urgency,\n    justification: record.justification,\n    userPrompt,\n  }\n}];"
+      },
+      "id": "validate-and-extract",
+      "name": "Validate & Extract Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"system_instruction\": {\n    \"parts\": [{\n      \"text\": \"You are Dayflow, an expert AI HR Assistant. Your goal is to evaluate employee time-off and resource requests objectively based on standard corporate policy. You must analyze the justification, urgency, and dates. You will strictly output your response as valid JSON matching the provided schema, with no markdown formatting outside of the JSON block. Do not auto-reject unless the request violates standard professional norms; otherwise, suggest approval.\"\n    }]\n  },\n  \"contents\": [{\n    \"role\": \"user\",\n    \"parts\": [{ \"text\": \"{{ $json.userPrompt }}\" }]\n  }],\n  \"generationConfig\": {\n    \"responseMimeType\": \"application/json\",\n    \"responseSchema\": {\n      \"type\": \"OBJECT\",\n      \"properties\": {\n        \"decision\":              { \"type\": \"STRING\",  \"description\": \"Must be exactly 'Approved' or 'Requires Manual Review'.\" },\n        \"reasoning\":             { \"type\": \"STRING\",  \"description\": \"A concise 2-sentence explanation for the decision.\" },\n        \"calendarEventRequired\": { \"type\": \"BOOLEAN\", \"description\": \"True if the request entails taking time off.\" },\n        \"sentimentAnalysis\":     { \"type\": \"STRING\",  \"description\": \"Assessment of the justification's professional tone.\" }\n      },\n      \"required\": [\"decision\", \"reasoning\", \"calendarEventRequired\", \"sentimentAnalysis\"]\n    },\n    \"temperature\": 0.2\n  }\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "gemini-evaluate",
+      "name": "Gemini AI Evaluation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "gemini-api-key-cred",
+          "name": "Gemini API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse Gemini response into the AI evaluation JSON\nconst geminiResponse = $input.first().json;\nconst candidate = geminiResponse.candidates?.[0];\nif (!candidate) throw new Error('Gemini returned no candidates');\n\nlet aiEval;\ntry {\n  const rawText = candidate.content?.parts?.[0]?.text ?? '{}';\n  aiEval = JSON.parse(rawText);\n} catch (e) {\n  throw new Error('Failed to parse Gemini JSON response: ' + e.message);\n}\n\n// Validate required fields\nconst required = ['decision', 'reasoning', 'calendarEventRequired', 'sentimentAnalysis'];\nfor (const field of required) {\n  if (aiEval[field] === undefined) {\n    throw new Error(`Missing field in AI response: ${field}`);\n  }\n}\n\n// Map Gemini decision → Supabase status\nconst statusMap = {\n  'Approved':              'Approved',\n  'Requires Manual Review': 'Requires Manual Review',\n};\nconst supabaseStatus = statusMap[aiEval.decision] ?? 'Requires Manual Review';\n\nreturn [{\n  json: {\n    ...($node['Validate & Extract Payload'].json),\n    aiEvaluation: aiEval,\n    supabaseStatus,\n  }\n}];"
+      },
+      "id": "parse-gemini",
+      "name": "Parse AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/employee_requests?id=eq.{{ $json.requestId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Prefer",        "value": "return=minimal" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"status\": \"{{ $json.supabaseStatus }}\",\n  \"ai_evaluation_json\": {{ JSON.stringify($json.aiEvaluation) }}\n}",
+        "options": {}
+      },
+      "id": "update-supabase",
+      "name": "Update Supabase Record",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.supabaseStatus }}",
+              "operation": "equals",
+              "value2": "Approved"
+            }
+          ]
+        }
+      },
+      "id": "branch-approved",
+      "name": "Branch: Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "calendarId": "primary",
+        "start": "={{ $json.startDate }}",
+        "end": "={{ $json.endDate }}",
+        "additionalFields": {
+          "summary": "=[Dayflow] {{ $json.requestType }} — Approved",
+          "description": "=AI Evaluation Reasoning: {{ $json.aiEvaluation.reasoning }}\n\nSentiment: {{ $json.aiEvaluation.sentimentAnalysis }}\n\nEmployee justification: {{ $json.justification }}",
+          "colorId": "2"
+        }
+      },
+      "id": "create-calendar-event",
+      "name": "Create Google Calendar Event",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.1,
+      "position": [1560, 160],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "google-workspace-cred",
+          "name": "Google Workspace OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Requests",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "ID":           "={{ $json.requestId }}",
+            "Employee_ID":  "={{ $json.userId }}",
+            "Request_Type": "={{ $json.requestType }}",
+            "Start_Date":   "={{ $json.startDate }}",
+            "End_Date":     "={{ $json.endDate }}",
+            "Urgency":      "={{ $json.urgency }}",
+            "Status":       "={{ $json.supabaseStatus }}",
+            "AI_Decision":  "={{ $json.aiEvaluation.decision }}",
+            "AI_Reasoning": "={{ $json.aiEvaluation.reasoning }}",
+            "Timestamp":    "={{ new Date().toISOString() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "update-google-sheet",
+      "name": "Append to Google Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [1560, 440],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-workspace-cred",
+          "name": "Google Workspace OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo":  "={{ $json.userId }}",
+        "subject": "=[Dayflow] Your {{ $json.requestType }} Request — {{ $json.supabaseStatus }}",
+        "emailType": "html",
+        "message": "=<!DOCTYPE html>\n<html>\n<head>\n  <style>\n    body { font-family: 'Inter', Arial, sans-serif; background: #0f0f1a; color: #e2e8f0; margin: 0; padding: 20px; }\n    .container { max-width: 600px; margin: 0 auto; background: #1a1a35; border-radius: 16px; overflow: hidden; border: 1px solid rgba(99,102,241,0.2); }\n    .header { background: linear-gradient(135deg, #4f46e5, #7c3aed); padding: 32px; text-align: center; }\n    .header h1 { margin: 0; font-size: 24px; color: #fff; font-weight: 700; }\n    .header p { margin: 8px 0 0; color: rgba(255,255,255,0.7); font-size: 14px; }\n    .body { padding: 32px; }\n    .status-badge { display: inline-block; padding: 6px 16px; border-radius: 9999px; font-size: 13px; font-weight: 600; margin-bottom: 24px; }\n    .approved { background: rgba(52,211,153,0.15); color: #34d399; border: 1px solid rgba(52,211,153,0.3); }\n    .review   { background: rgba(167,139,250,0.15); color: #a78bfa; border: 1px solid rgba(167,139,250,0.3); }\n    .detail-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 14px; }\n    .detail-label { color: #64748b; }\n    .ai-box { background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.2); border-radius: 12px; padding: 20px; margin-top: 24px; }\n    .ai-box h3 { margin: 0 0 12px; font-size: 14px; color: #a5b4fc; }\n    .footer { text-align: center; padding: 20px; color: #475569; font-size: 12px; border-top: 1px solid rgba(255,255,255,0.06); }\n  </style>\n</head>\n<body>\n  <div class='container'>\n    <div class='header'>\n      <h1>⚡ Dayflow</h1>\n      <p>Your request has been evaluated</p>\n    </div>\n    <div class='body'>\n      <span class='status-badge {{ $json.supabaseStatus === \"Approved\" ? \"approved\" : \"review\" }}'>\n        {{ $json.supabaseStatus }}\n      </span>\n      <div class='detail-row'><span class='detail-label'>Request Type</span><span>{{ $json.requestType }}</span></div>\n      <div class='detail-row'><span class='detail-label'>Dates</span><span>{{ $json.startDate }} → {{ $json.endDate }}</span></div>\n      <div class='detail-row'><span class='detail-label'>Urgency</span><span>{{ $json.urgency }}</span></div>\n      <div class='ai-box'>\n        <h3>🤖 Gemini AI Reasoning</h3>\n        <p style='margin:0; font-size:14px; line-height:1.6; color:#cbd5e1;'>{{ $json.aiEvaluation.reasoning }}</p>\n        <p style='margin:12px 0 0; font-size:12px; color:#64748b;'>Sentiment: {{ $json.aiEvaluation.sentimentAnalysis }}</p>\n      </div>\n      {{ $json.supabaseStatus === \"Approved\" ? \"<p style='margin-top:20px;font-size:14px;color:#34d399;'>✓ A Google Calendar event has been created for your approved time off.</p>\" : \"\" }}\n    </div>\n    <div class='footer'>Sent by Dayflow HRMS · Powered by Gemini AI</div>\n  </div>\n</body>\n</html>",
+        "options": {}
+      },
+      "id": "send-email",
+      "name": "Send Decision Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1780, 300],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "google-workspace-cred",
+          "name": "Google Workspace OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"processed\", \"requestId\": \"{{ $('Validate & Extract Payload').item.json.requestId }}\", \"decision\": \"{{ $('Parse AI Response').item.json.supabaseStatus }}\" }"
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2000, 300]
+    }
+  ],
+  "connections": {
+    "Catch Supabase Webhook": {
+      "main": [[{ "node": "Validate & Extract Payload", "type": "main", "index": 0 }]]
+    },
+    "Validate & Extract Payload": {
+      "main": [[{ "node": "Gemini AI Evaluation", "type": "main", "index": 0 }]]
+    },
+    "Gemini AI Evaluation": {
+      "main": [[{ "node": "Parse AI Response", "type": "main", "index": 0 }]]
+    },
+    "Parse AI Response": {
+      "main": [[{ "node": "Update Supabase Record", "type": "main", "index": 0 }]]
+    },
+    "Update Supabase Record": {
+      "main": [[{ "node": "Branch: Approved?", "type": "main", "index": 0 }]]
+    },
+    "Branch: Approved?": {
+      "main": [
+        [{ "node": "Create Google Calendar Event", "type": "main", "index": 0 }],
+        [{ "node": "Append to Google Sheet",       "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Google Calendar Event": {
+      "main": [[{ "node": "Append to Google Sheet", "type": "main", "index": 0 }]]
+    },
+    "Append to Google Sheet": {
+      "main": [[{ "node": "Send Decision Email", "type": "main", "index": 0 }]]
+    },
+    "Send Decision Email": {
+      "main": [[{ "node": "Webhook Response", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "last",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "dayflow-workflow"
+  },
+  "pinData": {},
+  "versionId": "1.0.0",
+  "triggerCount": 0,
+  "tags": [
+    { "createdAt": "2026-10-06", "updatedAt": "2026-10-06", "id": "1", "name": "dayflow" },
+    { "createdAt": "2026-10-06", "updatedAt": "2026-10-06", "id": "2", "name": "ai-automation" }
+  ]
+}

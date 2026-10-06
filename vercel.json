@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "name": "dayflow",
+  "builds": [
+    {
+      "src": "frontend/package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "distDir": "frontend/dist"
+      }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/assets/(.*)",
+      "dest": "/assets/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
+    }
+  ],
+  "env": {
+    "VITE_SUPABASE_URL":      "@dayflow_supabase_url",
+    "VITE_SUPABASE_ANON_KEY": "@dayflow_supabase_anon_key"
+  }
+}
